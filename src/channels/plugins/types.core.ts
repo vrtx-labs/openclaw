@@ -50,6 +50,9 @@ export type ChannelSetupInput = {
   groupChannels?: string[];
   dmAllowlist?: string[];
   autoDiscoverChannels?: boolean;
+  username?: string;
+  paperkey?: string;
+  paperkeyFile?: string;
 };
 
 export type ChannelStatusIssue = {

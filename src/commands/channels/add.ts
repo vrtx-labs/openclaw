@@ -198,6 +198,9 @@ export async function channelsAddCommand(
     groupChannels,
     dmAllowlist,
     autoDiscoverChannels: opts.autoDiscoverChannels,
+    username: opts.username,
+    paperkey: opts.paperkey,
+    paperkeyFile: opts.paperkeyFile,
   };
 
   const validationError = plugin.setup.validateInput?.({

@@ -893,6 +893,7 @@
                   "channels/telegram",
                   "channels/discord",
                   "channels/irc",
+                  "channels/keybase",
                   "channels/slack",
                   "channels/feishu",
                   "channels/googlechat",

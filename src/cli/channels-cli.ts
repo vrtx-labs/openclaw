@@ -197,6 +197,9 @@ export function registerChannelsCli(program: Command) {
     .option("--dm-allowlist <list>", "Tlon DM allowlist (comma-separated ships)")
     .option("--auto-discover-channels", "Tlon auto-discover group channels")
     .option("--no-auto-discover-channels", "Disable Tlon auto-discovery")
+    .option("--username <username>", "Keybase bot username")
+    .option("--paperkey <paperkey>", "Keybase paper key")
+    .option("--paperkey-file <path>", "Keybase paper key file path")
     .option("--use-env", "Use env token (default account only)", false)
     .action(async (opts, command) => {
       await runChannelsCommand(async () => {

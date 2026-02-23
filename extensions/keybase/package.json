@@ -1,0 +1,33 @@
+{
+  "name": "@openclaw/keybase",
+  "version": "2026.2.23",
+  "description": "OpenClaw Keybase channel plugin",
+  "type": "module",
+  "dependencies": {
+    "@vrtx-labs/keybase-bot": "file:../../../keybase-bot",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "channel": {
+      "id": "keybase",
+      "label": "Keybase",
+      "selectionLabel": "Keybase (plugin)",
+      "docsPath": "/channels/keybase",
+      "docsLabel": "keybase",
+      "blurb": "encrypted messaging; install the plugin and keybase binary to enable.",
+      "order": 80,
+      "quickstartAllowFrom": true
+    },
+    "install": {
+      "npmSpec": "@openclaw/keybase",
+      "localPath": "extensions/keybase",
+      "defaultChoice": "npm"
+    }
+  }
+}
