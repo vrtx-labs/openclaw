@@ -67,7 +67,10 @@ export async function handleKeybaseInbound(params: {
   const core = getKeybaseRuntime();
 
   const rawBody = message.text?.trim() ?? "";
-  if (!rawBody) {
+  const hasAttachments = (message.attachments?.length ?? 0) > 0;
+
+  // Skip messages with neither text nor attachments.
+  if (!rawBody && !hasAttachments) {
     return;
   }
 
@@ -105,14 +108,18 @@ export async function handleKeybaseInbound(params: {
       return;
     }
     if (groupPolicy === "allowlist") {
-      const teamKey = message.target.replace(/^team:/, "");
-      const teams = account.config.teams ?? {};
-      const hasEntry =
-        Object.prototype.hasOwnProperty.call(teams, teamKey) ||
-        Object.prototype.hasOwnProperty.call(teams, "*");
-      if (!hasEntry) {
-        runtime.log?.(`keybase: drop group ${message.target} (not in teams allowlist)`);
-        return;
+      // Team channels: check the teams allowlist config.
+      // Non-team group chats (multi-user DMs): skip the teams check — use sender gate only.
+      if (message.isTeamChannel) {
+        const teamKey = message.target.replace(/^team:/, "");
+        const teams = account.config.teams ?? {};
+        const hasEntry =
+          Object.prototype.hasOwnProperty.call(teams, teamKey) ||
+          Object.prototype.hasOwnProperty.call(teams, "*");
+        if (!hasEntry) {
+          runtime.log?.(`keybase: drop group ${message.target} (not in teams allowlist)`);
+          return;
+        }
       }
     }
     // Sender gate for groups.
@@ -157,9 +164,7 @@ export async function handleKeybaseInbound(params: {
             }
           }
         }
-        runtime.log?.(
-          `keybase: drop DM from ${message.senderUsername} (dmPolicy=${dmPolicy})`,
-        );
+        runtime.log?.(`keybase: drop DM from ${message.senderUsername} (dmPolicy=${dmPolicy})`);
         return;
       }
     }
@@ -197,13 +202,12 @@ export async function handleKeybaseInbound(params: {
     return;
   }
 
-  // Resolve team channel config for requireMention.
-  const teamKey = message.isGroup ? message.target.replace(/^team:/, "") : null;
+  // Resolve team channel config for requireMention (only applies to actual team channels).
+  const teamKey = message.isTeamChannel ? message.target.replace(/^team:/, "") : null;
   const teams = account.config.teams ?? {};
-  const teamConfig = teamKey
-    ? (teams[teamKey] ?? teams["*"] ?? null)
-    : null;
-  const requireMention = message.isGroup ? (teamConfig?.requireMention ?? true) : false;
+  const teamConfig = teamKey ? (teams[teamKey] ?? teams["*"] ?? null) : null;
+  // Group chats (non-team) don't require a mention — respond to all messages from allowed senders.
+  const requireMention = message.isTeamChannel ? (teamConfig?.requireMention ?? true) : false;
 
   if (message.isGroup && requireMention && !commandGate.commandAuthorized) {
     const mentionRegexes = core.channel.mentions.buildMentionRegexes(config as OpenClawConfig);
@@ -235,24 +239,35 @@ export async function handleKeybaseInbound(params: {
     sessionKey: route.sessionKey,
   });
 
+  // For attachment-only messages, use a placeholder based on MIME type.
+  const firstAttachmentMime = message.attachments?.[0]?.mimeType ?? "";
+  const mediaPlaceholder =
+    firstAttachmentMime.startsWith("audio/") || firstAttachmentMime.startsWith("video/")
+      ? "<media:audio>"
+      : "<media:image>";
+  const effectiveBodyText = rawBody || (hasAttachments ? mediaPlaceholder : "");
+
   const body = core.channel.reply.formatAgentEnvelope({
     channel: "Keybase",
     from: fromLabel,
     timestamp: message.timestamp,
     previousTimestamp,
     envelope: envelopeOptions,
-    body: rawBody,
+    body: effectiveBodyText,
   });
 
   const groupSystemPrompt = teamConfig?.systemPrompt?.trim() || undefined;
 
+  // Build media payload from downloaded attachments.
+  const attachments = message.attachments ?? [];
+  const mediaPaths = attachments.map((a) => a.localPath);
+  const mediaTypes = attachments.map((a) => a.mimeType);
+
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
-    RawBody: rawBody,
+    RawBody: rawBody || effectiveBodyText,
     CommandBody: rawBody,
-    From: message.isGroup
-      ? `keybase:team:${message.target}`
-      : `keybase:${message.senderUsername}`,
+    From: message.isGroup ? `keybase:team:${message.target}` : `keybase:${message.senderUsername}`,
     To: `keybase:${peerId}`,
     SessionKey: route.sessionKey,
     AccountId: route.accountId,
@@ -269,6 +284,15 @@ export async function handleKeybaseInbound(params: {
     OriginatingChannel: CHANNEL_ID,
     OriginatingTo: `keybase:${peerId}`,
     CommandAuthorized: commandGate.commandAuthorized,
+    // Media attachments.
+    ...(mediaPaths.length > 0 && {
+      MediaPath: mediaPaths[0],
+      MediaUrl: mediaPaths[0],
+      MediaPaths: mediaPaths,
+      MediaUrls: mediaPaths,
+      MediaType: mediaTypes[0],
+      MediaTypes: mediaTypes,
+    }),
   });
 
   await core.channel.session.recordInboundSession({

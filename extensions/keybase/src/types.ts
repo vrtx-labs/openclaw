@@ -51,6 +51,16 @@ export type ResolvedKeybaseAccount = {
   config: KeybaseAccountConfig;
 };
 
+/** A downloaded attachment included in an inbound Keybase message. */
+export type KeybaseAttachment = {
+  /** Local filesystem path where the attachment was downloaded. */
+  localPath: string;
+  /** MIME type reported by Keybase (e.g. "image/jpeg"). */
+  mimeType: string;
+  /** Original filename. */
+  filename: string;
+};
+
 /** Inbound message from Keybase chat listener. */
 export type KeybaseInboundMessage = {
   messageId: string;
@@ -60,12 +70,16 @@ export type KeybaseInboundMessage = {
   text: string;
   timestamp: number;
   isGroup: boolean;
+  /** True when this is a Keybase team channel (as opposed to a multi-user group DM). */
+  isTeamChannel: boolean;
   /** Raw Keybase channel object for replies. */
   rawChannel: {
     name: string;
     membersType?: string;
     topicName?: string;
   };
+  /** Downloaded attachments (images, files) included in this message. */
+  attachments?: KeybaseAttachment[];
 };
 
 export type KeybaseProbe = BaseProbeResult<string> & {
