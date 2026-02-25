@@ -16,7 +16,6 @@ import {
   resolveDefaultKeybaseAccountId,
   resolveKeybaseAccount,
 } from "./accounts.js";
-import type { ResolvedKeybaseAccount } from "./types.js";
 import { KeybaseConfigSchema } from "./config-schema.js";
 import { monitorKeybaseProvider } from "./monitor.js";
 import {
@@ -26,7 +25,8 @@ import {
 } from "./normalize.js";
 import { keybaseOnboardingAdapter } from "./onboarding.js";
 import { probeKeybase } from "./probe.js";
-import { sendMessageKeybase } from "./send.js";
+import { attachFileKeybase, sendMessageKeybase } from "./send.js";
+import type { ResolvedKeybaseAccount } from "./types.js";
 import type { CoreConfig, KeybaseProbe } from "./types.js";
 
 const meta = {
@@ -57,7 +57,7 @@ export const keybasePlugin: ChannelPlugin<ResolvedKeybaseAccount, KeybaseProbe> 
   },
   capabilities: {
     chatTypes: ["direct", "group"],
-    media: false,
+    media: true,
   },
   reload: { configPrefixes: ["channels.keybase"] },
   configSchema: buildChannelConfigSchema(KeybaseConfigSchema),
@@ -91,9 +91,9 @@ export const keybasePlugin: ChannelPlugin<ResolvedKeybaseAccount, KeybaseProbe> 
       paperkeySource: account.paperkeySource,
     }),
     resolveAllowFrom: ({ cfg, accountId }) =>
-      (
-        resolveKeybaseAccount({ cfg: cfg as CoreConfig, accountId }).config.allowFrom ?? []
-      ).map((entry) => String(entry)),
+      (resolveKeybaseAccount({ cfg: cfg as CoreConfig, accountId }).config.allowFrom ?? []).map(
+        (entry) => String(entry),
+      ),
     formatAllowFrom: ({ allowFrom }) =>
       allowFrom.map((entry) => normalizeKeybaseAllowEntry(String(entry))).filter(Boolean),
   },
@@ -219,6 +219,17 @@ export const keybasePlugin: ChannelPlugin<ResolvedKeybaseAccount, KeybaseProbe> 
       return { channel: "keybase", ...result };
     },
     sendMedia: async ({ to, text, mediaUrl, accountId }) => {
+      // If mediaUrl looks like a local file path, send it as an attachment.
+      if (mediaUrl && (mediaUrl.startsWith("/") || mediaUrl.startsWith("./"))) {
+        if (text?.trim()) {
+          await sendMessageKeybase(to, text.trim(), { accountId: accountId ?? undefined });
+        }
+        const result = await attachFileKeybase(to, mediaUrl, {
+          accountId: accountId ?? undefined,
+          title: text?.trim() || undefined,
+        });
+        return { channel: "keybase", ...result };
+      }
       const combined = mediaUrl ? `${text}\n\nAttachment: ${mediaUrl}` : text;
       const result = await sendMessageKeybase(to, combined, {
         accountId: accountId ?? undefined,
@@ -329,9 +340,7 @@ export const keybasePlugin: ChannelPlugin<ResolvedKeybaseAccount, KeybaseProbe> 
           `Keybase is not configured for account "${account.accountId}" (need username and paperkey in channels.keybase).`,
         );
       }
-      ctx.log?.info(
-        `[${account.accountId}] starting Keybase provider (${account.username})`,
-      );
+      ctx.log?.info(`[${account.accountId}] starting Keybase provider (${account.username})`);
       const { stop } = await monitorKeybaseProvider({
         accountId: account.accountId,
         config: ctx.cfg as CoreConfig,

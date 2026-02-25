@@ -39,6 +39,59 @@ function buildChatChannel(target: string): {
   return { name: target, membersType: "impteamnative" };
 }
 
+export async function attachFileKeybase(
+  to: string,
+  filePath: string,
+  opts: SendKeybaseOptions & { title?: string } = {},
+): Promise<SendKeybaseResult> {
+  const runtime = getKeybaseRuntime();
+  const cfg = runtime.config.loadConfig() as CoreConfig;
+  const account = resolveKeybaseAccount({ cfg, accountId: opts.accountId });
+
+  if (!account.configured) {
+    throw new Error(
+      `Keybase is not configured for account "${account.accountId}" (need username and paperkey in channels.keybase).`,
+    );
+  }
+
+  const normalized = normalizeKeybaseTarget(to);
+  if (!normalized) {
+    throw new Error(`Invalid Keybase target: ${to}`);
+  }
+
+  const channel = buildChatChannel(normalized);
+
+  let bot = getLiveBot(account.accountId);
+  let transient = false;
+  if (!bot) {
+    bot = await initKeybaseBot(account);
+    transient = true;
+  }
+
+  let msgId = 0;
+  try {
+    const result = await bot.chat.attach(channel, filePath, {
+      title: opts.title,
+    });
+    msgId = result.id ?? 0;
+  } finally {
+    if (transient) {
+      await deinitKeybaseBot(bot as Bot, account.accountId);
+    }
+  }
+
+  runtime.channel.activity.record({
+    channel: "keybase",
+    accountId: account.accountId,
+    direction: "outbound",
+  });
+
+  return {
+    messageId: String(msgId || Date.now()),
+    target: normalized,
+  };
+}
+
 export async function sendMessageKeybase(
   to: string,
   text: string,

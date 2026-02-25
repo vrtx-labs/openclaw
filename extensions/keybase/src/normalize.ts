@@ -1,11 +1,12 @@
 /**
  * Keybase target formats:
- *   DM:    "alice"  or  "user:alice"
- *   Team:  "myteam#general"  or  "team:myteam#general"
+ *   DM:         "alice"  or  "user:alice"
+ *   Team:       "myteam#general"  or  "team:myteam#general"
+ *   Group chat: "alice,bob,vrtxbot"  (comma-separated participants, impteamnative)
  *
  * Canonical outbound targets sent to bot.chat.send():
- *   DM:    ChatChannel { name: "alice", membersType: "impteamnative" }
- *   Team:  ChatChannel { name: "myteam", membersType: "team", topicName: "general" }
+ *   DM/Group:  ChatChannel { name: "alice" | "alice,bob,vrtxbot", membersType: "impteamnative" }
+ *   Team:      ChatChannel { name: "myteam", membersType: "team", topicName: "general" }
  */
 
 /** Returns true when the string looks like a Keybase team channel target. */
@@ -52,11 +53,13 @@ export function normalizeKeybaseTarget(raw: string): string | undefined {
 
   // Validate: Keybase usernames are lowercase alphanumeric + underscore.
   // Team names can also contain dots and dashes. Topic names: alphanumeric + dashes.
+  // Group chats: comma-separated usernames (e.g. "alice,bob,vrtxbot").
   const teamPattern = /^[a-z0-9_][a-z0-9_.]{0,62}#[a-z0-9_-]+$/;
   const userPattern = /^[a-z0-9_][a-z0-9_]{0,14}$/;
+  const groupPattern = /^[a-z0-9_][a-z0-9_]{0,14}(,[a-z0-9_][a-z0-9_]{0,14})+$/;
 
   const lower = normalized.toLowerCase();
-  if (teamPattern.test(lower) || userPattern.test(lower)) {
+  if (teamPattern.test(lower) || userPattern.test(lower) || groupPattern.test(lower)) {
     return lower;
   }
 

@@ -1,10 +1,14 @@
+import { randomUUID } from "node:crypto";
+import { copyFile, mkdir, rm } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import type { RuntimeEnv } from "openclaw/plugin-sdk";
 import { resolveKeybaseAccount } from "./accounts.js";
 import { clearLiveBot, deinitKeybaseBot, initKeybaseBot, setLiveBot } from "./bot-client.js";
 import { handleKeybaseInbound } from "./inbound.js";
 import { isKeybaseTeamTarget } from "./normalize.js";
 import { getKeybaseRuntime } from "./runtime.js";
-import type { CoreConfig, KeybaseInboundMessage } from "./types.js";
+import type { CoreConfig, KeybaseAttachment, KeybaseInboundMessage } from "./types.js";
 
 export type KeybaseMonitorOptions = {
   accountId?: string;
@@ -17,19 +21,29 @@ export type KeybaseMonitorOptions = {
 function buildInboundTarget(params: {
   channel: { name: string; membersType?: string; topicName?: string };
   senderUsername: string;
-}): { target: string; isGroup: boolean } {
+}): { target: string; isGroup: boolean; isTeamChannel: boolean } {
   const { channel, senderUsername } = params;
   const membersType = channel.membersType ?? "";
-  // Team messages: membersType is "team" or similar.
+  // Team channels.
   if (membersType === "team" || membersType === "impteam") {
     const topic = channel.topicName ? `#${channel.topicName}` : "#general";
-    return { target: `team:${channel.name}${topic}`, isGroup: true };
+    return { target: `team:${channel.name}${topic}`, isGroup: true, isTeamChannel: true };
   }
-  // DM: use sender username.
-  return { target: senderUsername, isGroup: false };
+  // impteamnative group chats: channel.name is comma-separated participants.
+  if (membersType === "impteamnative" && channel.name.includes(",")) {
+    const participants = channel.name.split(",").map((s) => s.trim());
+    if (participants.length > 2) {
+      // Multi-person group chat — use the full channel name as target, not a team channel.
+      return { target: channel.name, isGroup: true, isTeamChannel: false };
+    }
+  }
+  // 1:1 DM — reply to sender directly.
+  return { target: senderUsername, isGroup: false, isTeamChannel: false };
 }
 
-export async function monitorKeybaseProvider(opts: KeybaseMonitorOptions): Promise<{ stop: () => void }> {
+export async function monitorKeybaseProvider(
+  opts: KeybaseMonitorOptions,
+): Promise<{ stop: () => void }> {
   const core = getKeybaseRuntime();
   const cfg = opts.config ?? (core.config.loadConfig() as CoreConfig);
   const account = resolveKeybaseAccount({ cfg, accountId: opts.accountId });
@@ -76,6 +90,9 @@ export async function monitorKeybaseProvider(opts: KeybaseMonitorOptions): Promi
 
   let stopped = false;
 
+  /** Default max attachment size in bytes (20 MB). */
+  const mediaMaxBytes = (account.config.mediaMaxMb ?? 20) * 1024 * 1024;
+
   // watchAllChannelsForNewMessages returns a Promise that resolves when the
   // internal listen process exits. We race it against the abort signal.
   const listenPromise = bot.chat.watchAllChannelsForNewMessages(
@@ -84,9 +101,16 @@ export async function monitorKeybaseProvider(opts: KeybaseMonitorOptions): Promi
         return;
       }
 
-      // Only handle text messages.
       const content = msg.content;
-      if (!content || content.type !== "text" || !content.text?.body?.trim()) {
+      if (!content) {
+        return;
+      }
+
+      const isText = content.type === "text" && Boolean(content.text?.body?.trim());
+      const isAttachment = content.type === "attachment";
+
+      // Skip messages that are neither text nor attachment.
+      if (!isText && !isAttachment) {
         return;
       }
 
@@ -101,19 +125,103 @@ export async function monitorKeybaseProvider(opts: KeybaseMonitorOptions): Promi
         return;
       }
 
-      const { target, isGroup } = buildInboundTarget({
+      const { target, isGroup, isTeamChannel } = buildInboundTarget({
         channel: rawChannel,
         senderUsername,
       });
+
+      // Resolve message text (attachment title serves as caption).
+      const text = isText
+        ? (content.text?.body?.trim() ?? "")
+        : (content.attachment?.object?.title?.trim() ?? "");
+
+      // Download attachments to a temp directory.
+      let attachments: KeybaseAttachment[] | undefined;
+      let tempDir: string | undefined;
+
+      if (isAttachment && content.attachment) {
+        const asset = content.attachment.object;
+        const mimeType = asset?.mimeType ?? "application/octet-stream";
+        // Derive a safe filename from the asset; voice messages often have no filename.
+        const ext =
+          mimeType === "video/mp4"
+            ? ".mp4"
+            : mimeType === "image/jpeg"
+              ? ".jpg"
+              : mimeType === "image/png"
+                ? ".png"
+                : mimeType === "audio/ogg"
+                  ? ".ogg"
+                  : ".bin";
+        const rawFilename = asset?.filename?.trim() ?? "";
+        const filename = rawFilename && rawFilename !== "." ? rawFilename : `attachment${ext}`;
+        const fileSize = asset?.size ?? 0;
+
+        const isSupportedMime =
+          mimeType.startsWith("image/") ||
+          mimeType.startsWith("audio/") ||
+          mimeType.startsWith("video/"); // Keybase sends audio recordings as video/mp4
+
+        // Only process supported attachments within size limit.
+        if (isSupportedMime && fileSize <= mediaMaxBytes) {
+          try {
+            const { chmod } = await import("node:fs/promises");
+            // Step 1: download into /tmp (world-writable, vrtxbot can write here).
+            const tmpDownloadDir = join(tmpdir(), `keybase-dl-${randomUUID()}`);
+            await mkdir(tmpDownloadDir, { recursive: true });
+            await chmod(tmpDownloadDir, 0o777);
+            const tmpPath = join(tmpDownloadDir, filename);
+            await bot.chat.download(rawChannel, msg.id, tmpPath);
+
+            // Step 2: copy into the OpenClaw media dir (root-owned, agent sandbox allows it).
+            const mediaDir = join(homedir(), ".openclaw", "media", "keybase", randomUUID());
+            await mkdir(mediaDir, { recursive: true });
+            const finalPath = join(mediaDir, filename);
+            await copyFile(tmpPath, finalPath);
+
+            // Clean up tmp download.
+            rm(tmpDownloadDir, { recursive: true, force: true }).catch(() => {});
+
+            tempDir = mediaDir;
+            attachments = [{ localPath: finalPath, mimeType, filename }];
+          } catch (err) {
+            logger.error(
+              `[${account.accountId}] attachment download failed (msg ${msg.id}): ${err instanceof Error ? err.message : String(err)}`,
+            );
+            // Clean up on failure only.
+            if (tempDir) {
+              rm(tempDir, { recursive: true, force: true }).catch(() => {});
+              tempDir = undefined;
+            }
+          }
+        } else if (!isSupportedMime) {
+          runtime.log?.(
+            `keybase: skipping unsupported attachment (${mimeType}) from ${senderUsername}`,
+          );
+          return;
+        } else {
+          runtime.log?.(
+            `keybase: skipping oversized attachment (${fileSize} bytes) from ${senderUsername}`,
+          );
+          return;
+        }
+      }
+
+      // Skip if nothing to process.
+      if (!text && (!attachments || attachments.length === 0)) {
+        return;
+      }
 
       const message: KeybaseInboundMessage = {
         messageId: String(msg.id),
         target,
         senderUsername,
-        text: content.text.body.trim(),
+        text,
         timestamp: msg.sentAt ? msg.sentAt * 1000 : Date.now(),
         isGroup,
+        isTeamChannel,
         rawChannel,
+        attachments,
       };
 
       core.channel.activity.record({
@@ -132,6 +240,9 @@ export async function monitorKeybaseProvider(opts: KeybaseMonitorOptions): Promi
           `[${account.accountId}] inbound handler error: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
+      // Note: attachment temp dirs are intentionally NOT cleaned up here — the
+      // agent run is async and may still be accessing the file. The OS will
+      // reclaim /tmp on reboot. A future improvement could schedule deferred cleanup.
     },
     (err) => {
       if (!stopped) {
